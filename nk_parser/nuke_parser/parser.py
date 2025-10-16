@@ -395,7 +395,7 @@ def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
     """
     gizmos = gizmos or {}
 
-    with open(file_path) as file:
+    with open(file_path, encoding="utf8")) as file:
         lines = iter(file.readlines())
 
     main_stack = Stack[Node]()

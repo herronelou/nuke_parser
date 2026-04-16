@@ -26,13 +26,13 @@ from nuke_parser.stack import Stack
 GizmoNameStr = str
 
 _NODE_OPEN_RE = re.compile(r"(?P<type>[\w\.]+)\s\{$")
-_NODE_CLOSE_RE = re.compile(r"\}$")
-_NESTED_KNOB_CLOSE_RE = re.compile(r"^\s+\}\n")
-_BRANCH_STACK_RE = re.compile(r"set (?P<key>\w+) \[stack \d\]")  # set
+_NODE_CLOSE_RE = re.compile(r"}$")
+_NESTED_KNOB_CLOSE_RE = re.compile(r"^\s+}\n")
+_BRANCH_STACK_RE = re.compile(r"set (?P<key>\w+) \[stack \d]")  # set
 _PUSH_RE = re.compile(r"push \$(?P<key>\w+)")
-_VERSION_RE = re.compile(r"version[ ]+(?P<version>[\d\.]+([ ]v\d)?)")
+_VERSION_RE = re.compile(r"version +(?P<version>[\d.]+( v\d)?)")
 _CLONE_RE = re.compile(r"clone \$(?P<key>\w+)\s\{")
-_NODE_KNOB_RE = re.compile(r"^\s*(?P<key>[\w_\.]+)[ ]+(?P<value>(:?\"|\w|\{|-|/).*)")
+_NODE_KNOB_RE = re.compile(r"^\s*(?P<key>[\w_.]+) +(?P<value>(:?\"|\w|\{|-|/).*)")
 
 
 _GROUP_NODE_CLASSES = ("Group", "Gizmo")
@@ -40,16 +40,16 @@ ROOT_NODE_CLASSES = ("Root", "LiveGroupInfo")
 
 _USER_KNOB_RE = re.compile(
     r"\{\s*(?P<type>\d+)\s+(?P<name>[\w_]+)"
-    r'(?:\s+l\s+(?P<label>(?:"([^"]+)")|([\w_:;]+)))?'
+    r'(?:\s+l\s+(?P<label>"([^"]+)"|([\w_:;]+)))?'
     r'(?:\s+t\s+"(?P<tooltip>[^"]+)")?'
     r"(?:\s+\+DISABLED)?"
     r"(?:\s+\+INVISIBLE)?"
     r"(?:\s+-STARTLINE)?"
-    r"(?:\s+M\s+\{\s*(?P<enum_items>[^}]+)\s*\})?"
+    r"(?:\s+M\s+\{\s*(?P<enum_items>[^}]+)\s*})?"
     r"(?:\s+-STARTLINE)?"
     r"(?:\s+\+INVISIBLE)?"
     r"(?:\s+T\s+(?P<value>[\w_]+))?"
-    r"\s*\}"
+    r"\s*}"
 )
 
 
@@ -63,6 +63,8 @@ _SUPPORTED_KNOB_TYPES = (
     8,
     26,
 )
+
+
 # https://learn.foundry.com/nuke/developers/63/ndkdevguide/knobs-and-handles/knobtypes.html#knobs-knobtypes-text-knob
 
 
@@ -382,21 +384,13 @@ def parseUserKnob(knobs: Dict[str, Any], string: str) -> None:
         knobs[knob_name] = float(groups.get("value") or 0)
 
 
-def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
-    """Parse nuke script and return root node.
-
-    Args:
-        file_path: File path to nuke script.
-        gizmos: Dict of nk_parser gizmos {gizmo name: Gizmo class}.
-
-    Returns:
-        Root node of nuke scene description.
-
-    """
-    gizmos = gizmos or {}
-
-    with open(file_path, encoding="utf8")) as file:
-        lines = iter(file.readlines())
+def _parse_nk_generator(file_path: str, gizmos: dict, lines_iter=None) -> Generator[
+    tuple[str, Any, None, Stack[Node], Stack[Node]] | tuple[str, Any, Node, Stack[Node], Stack[Node]], None, Node]:
+    """Generator parser for debugging."""
+    if lines_iter is None:
+        with open(file_path, encoding="utf8") as file:
+            lines = list(file.readlines())
+            lines_iter = iter(enumerate(lines, 1))
 
     main_stack = Stack[Node]()
     node_map: Dict[str, Node] = {}
@@ -410,7 +404,10 @@ def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
         parents_stack.push(root)
         main_stack.push(root)
 
-    for line in lines:
+    for line_num, line in lines_iter:
+        # yield before processing line so we can stop at breakpoints
+        yield "line", line_num, None, main_stack, parents_stack
+
         if "push 0" in line:
             main_stack.push(None)
             continue
@@ -429,11 +426,13 @@ def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
             continue
         elif "end_group" in line:
             node_to_find = parents_stack.peek()
+
             node = main_stack.pop()
             while node != node_to_find and not main_stack.empty():
                 node = main_stack.pop()
             main_stack.push(node_to_find)
             parents_stack.pop()
+            yield "end_group", line_num, node_to_find, main_stack, parents_stack
             continue
 
         elif _CLONE_RE.search(line) and not class_:
@@ -465,7 +464,7 @@ def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
             if value.startswith('"'):
                 count = value.count('"') - value.count('\\"')
                 while count % 2 != 0:
-                    line = next(lines)
+                    next_line_num, line = next(lines_iter)
                     count += line.count('"') - line.count('\\"')
                     string += line
                 # Remove first and last quote to help the if the string holds serialized json.
@@ -473,12 +472,12 @@ def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
             elif value.startswith("{"):
                 count = value.count("{") - value.count("}")
                 while count:
-                    line = next(lines)
+                    next_line_num, line = next(lines_iter)
                     count += line.count("{") - line.count("}")
                     string += line
 
             if match.group("key") == "addUserKnob" and os.getenv(
-                "NK_PARSER_EXPERIMENTAL"
+                    "NK_PARSER_EXPERIMENTAL"
             ):
                 parseUserKnob(knobs, string)
                 continue
@@ -505,18 +504,36 @@ def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
                 _parseLiveGroup(nk_node, gizmos)
 
             main_stack.push(nk_node)
+
             if nk_node.Class() in ROOT_NODE_CLASSES:
                 parents_stack.push(nk_node)
+                yield "node", line_num, nk_node, main_stack, parents_stack
                 continue
 
             parents_stack.peek()._addChild(nk_node)
+            is_group = False
             # Deal with groups
             if nk_node.Class() in _GROUP_NODE_CLASSES or (
-                nk_node.Class() == "LiveGroup" and nk_node.knob("modified")
+                    nk_node.Class() == "LiveGroup" and nk_node.knob("modified")
             ):
+                is_group = True
+
+            yield "node", line_num, nk_node, main_stack, parents_stack
+
+            if is_group:
                 parents_stack.push(nk_node)
 
     return parents_stack.pop() if parents_stack else Node("Root", {})
+
+def _parseNk(file_path: str, gizmos: Optional[dict] = None) -> Node:
+    """Parse nuke script and return root node."""
+    gizmos = gizmos or {}
+    gen = _parse_nk_generator(file_path, gizmos)
+    try:
+        while True:
+            next(gen)
+    except StopIteration as e:
+        return e.value
 
 
 def _parseLiveGroup(live_group: Node, gizmos: Dict[str, Node]) -> None:

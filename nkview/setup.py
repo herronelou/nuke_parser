@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pyside_setup_macro import QtBuildDevelop, QtBuildPackage
 from setuptools import find_packages, setup
 
 import nkview
@@ -42,5 +41,4 @@ setup(
     ],
     entry_points={"console_scripts": ["nkview = nkview.app:run"]},
     description="Nuke script (nk) nk_parser.",
-    cmdclass={"build_py": QtBuildPackage, "develop": QtBuildDevelop},
 )
